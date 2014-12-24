@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -14,6 +15,8 @@ type user struct {
 	userID        string
 	locationIndex int
 	position      position
+	viewPortX     int
+	viewPortY     int
 }
 
 type position struct {
@@ -35,10 +38,10 @@ type command struct {
 type world struct {
 	locations []location
 	capacity  int
-	commands  []command
-	users     map[string]user
 
 	sync.Mutex
+	commands []command
+	users    map[string]user
 }
 
 type location struct {
@@ -85,8 +88,11 @@ func main() {
 
 func getWorld(wrld *world) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		wrld.createUser(r.FormValue("uid"))
-		w.Write(wrld.display())
+		// todo sanitize
+		width, _ := strconv.Atoi(r.FormValue("w"))
+		height, _ := strconv.Atoi(r.FormValue("h"))
+		wrld.createUser(r.FormValue("uid"), width, height)
+		w.Write(wrld.display(r.FormValue("uid"), width, height))
 	}
 }
 
@@ -125,19 +131,19 @@ func gameRunner(wrld *world, listener chan command) {
 	go func() {
 		for {
 			select {
-			case <-time.Tick(time.Millisecond * 250):
+			case <-time.Tick(time.Millisecond * 100):
 				wrld.updateBoard()
 			}
 		}
 	}()
 }
 
-func (wrld *world) createUser(userID string) {
+func (wrld *world) createUser(userID string, width, height int) {
 	startingPosition := position{x: 2, y: 3}
 
 	if _, found := wrld.users[userID]; !found {
 		log.Println("New user", userID)
-		wrld.users[userID] = user{userID: userID, position: startingPosition}
+		wrld.users[userID] = user{userID: userID, position: startingPosition, viewPortX: width, viewPortY: height}
 	}
 }
 
@@ -154,10 +160,13 @@ func (wrld *world) updateBoard() {
 	for _, cmd := range wrld.commands {
 		log.Println(cmd)
 
-		wrld.createUser(cmd.userID)
 		curPos := wrld.users[cmd.userID].position
 		newPos := applyMove(curPos, cmd.cmd)
 
+		if _, ok := wrld.locations[0].positions[newPos.String()]; !ok {
+			log.Printf("attempted location is non existant")
+			continue
+		}
 		if wrld.locations[0].positions[newPos.String()].closed {
 			log.Printf("attempted location is closed (%s) -> (%s)\n", curPos.String(), newPos.String())
 			continue
@@ -187,18 +196,29 @@ func (wrld *world) updateBoard() {
 	log.Println()
 }
 
-func (wrld *world) display() []byte {
+func (wrld *world) display(uid string, width, height int) []byte {
 	body := make([]rune, 0)
-	width := 80
-	height := 20
-	for y := 1; y <= height; y++ {
-		for x := 1; x <= width; x++ {
+
+	userX := wrld.users[uid].position.x
+	userY := wrld.users[uid].position.y
+
+	offsetY := (wrld.users[uid].viewPortY) / 2
+	offsetX := (wrld.users[uid].viewPortY) / 2
+
+	visibilityX := 12
+	visibilityY := 8
+
+	for y := 1 - offsetY; y <= height-offsetY; y++ {
+		for x := 1 - offsetX; x <= width-offsetX; x++ {
 			cell := fmt.Sprintf("%d,%d", x, y)
 			pos := wrld.locations[0].positions[cell]
 			if pos == nil {
 				continue
 			}
-			if pos.userID != "" {
+
+			if abs(userX-x) > visibilityX || abs(userY-y) > visibilityY {
+				body = append(body, ' ')
+			} else if pos.userID != "" {
 				// todo: depending on user class, use different symbols and colors
 				body = append(body, '◊')
 			} else {
@@ -210,6 +230,13 @@ func (wrld *world) display() []byte {
 	}
 
 	return []byte(string(body))
+}
+
+func abs(i int) int {
+	if i < 0 {
+		return i * -1
+	}
+	return i
 }
 
 func applyMove(p position, s string) position {
