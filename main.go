@@ -202,21 +202,26 @@ func (wrld *world) display(uid string, width, height int) []byte {
 	userX := wrld.users[uid].position.x
 	userY := wrld.users[uid].position.y
 
-	offsetY := (wrld.users[uid].viewPortY) / 2
-	offsetX := (wrld.users[uid].viewPortY) / 2
+	// offsetY := 0
+	// offsetX := 0
 
-	visibilityX := 12
-	visibilityY := 8
+	visibilityX := 15
+	visibilityY := 10
 
-	for y := 1 - offsetY; y <= height-offsetY; y++ {
-		for x := 1 - offsetX; x <= width-offsetX; x++ {
-			cell := fmt.Sprintf("%d,%d", x, y)
+	for y := 1; y <= height; y++ {
+		for x := 1; x <= width; x++ {
+			// WAT
+			// do something better here for the translation
+			translationX := -1*(wrld.users[uid].viewPortX/2) + userX + x
+			translationY := -1*(wrld.users[uid].viewPortY/2) + userY + y
+			cell := fmt.Sprintf("%d,%d", translationX, translationY)
 			pos := wrld.locations[0].positions[cell]
 			if pos == nil {
 				continue
+				body = append(body, 'x')
 			}
 
-			if abs(userX-x) > visibilityX || abs(userY-y) > visibilityY {
+			if abs(translationX-userX) > visibilityX || abs(translationY-userY) > visibilityY {
 				body = append(body, ' ')
 			} else if pos.userID != "" {
 				// todo: depending on user class, use different symbols and colors
