@@ -217,12 +217,12 @@ func (wrld *world) display(uid string, width, height int) []byte {
 			cell := fmt.Sprintf("%d,%d", translationX, translationY)
 			pos := wrld.locations[0].positions[cell]
 			if pos == nil {
+				body = append(body, '·')
 				continue
-				body = append(body, 'x')
 			}
 
 			if abs(translationX-userX) > visibilityX || abs(translationY-userY) > visibilityY {
-				body = append(body, ' ')
+				body = append(body, '·')
 			} else if pos.userID != "" {
 				// todo: depending on user class, use different symbols and colors
 				body = append(body, '◊')
