@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,6 +18,7 @@ type user struct {
 	position      position
 	viewPortX     int
 	viewPortY     int
+	modal         map[string]rune
 }
 
 type position struct {
@@ -143,7 +145,7 @@ func (wrld *world) createUser(userID string, width, height int) {
 
 	if _, found := wrld.users[userID]; !found {
 		log.Println("New user", userID)
-		wrld.users[userID] = user{userID: userID, position: startingPosition, viewPortX: width, viewPortY: height}
+		wrld.users[userID] = user{userID: userID, position: startingPosition, viewPortX: width, viewPortY: height, modal: loadModal(help())}
 	}
 }
 
@@ -159,6 +161,36 @@ func (wrld *world) updateBoard() {
 	log.Println("Commands:")
 	for _, cmd := range wrld.commands {
 		log.Println(cmd)
+
+		if cmd.cmd[0] == '>' {
+			log.Println("command processing")
+			thisCmd := strings.ToLower(strings.TrimSpace(cmd.cmd[1:]))
+			cmdPart := strings.Split(thisCmd, " ")
+			switch cmdPart[0] {
+			case "help":
+				tmpUser := wrld.users[cmd.userID]
+				tmpUser.modal = loadModal(help())
+				wrld.users[cmd.userID] = tmpUser
+
+			case "clear":
+				tmpUser := wrld.users[cmd.userID]
+				tmpUser.modal = loadModal("")
+				wrld.users[cmd.userID] = tmpUser
+
+			case "resize":
+				if len(cmdPart) == 3 {
+					tmpUser := wrld.users[cmd.userID]
+					// todo - err handling
+					width, _ := strconv.Atoi(cmdPart[1])
+					height, _ := strconv.Atoi(cmdPart[2])
+					tmpUser.viewPortX = width
+					tmpUser.viewPortY = height
+					wrld.users[cmd.userID] = tmpUser
+				}
+			}
+
+			continue
+		}
 
 		curPos := wrld.users[cmd.userID].position
 		newPos := applyMove(curPos, cmd.cmd)
@@ -216,19 +248,22 @@ func (wrld *world) display(uid string, width, height int) []byte {
 			translationY := -1*(wrld.users[uid].viewPortY/2) + userY + y
 			cell := fmt.Sprintf("%d,%d", translationX, translationY)
 			pos := wrld.locations[0].positions[cell]
-			if pos == nil {
-				body = append(body, '·')
-				continue
-			}
+			theRune := ' '
 
-			if abs(translationX-userX) > visibilityX || abs(translationY-userY) > visibilityY {
-				body = append(body, '·')
+			if r, ok := wrld.users[uid].modal[fmt.Sprintf("%d,%d", x, y)]; ok {
+				theRune = r
+			} else if pos == nil {
+				theRune = '·'
+			} else if abs(translationX-userX) > visibilityX || abs(translationY-userY) > visibilityY {
+				theRune = '·'
 			} else if pos.userID != "" {
 				// todo: depending on user class, use different symbols and colors
-				body = append(body, '◊')
+				theRune = '◊'
 			} else {
-				body = append(body, pos.character)
+				theRune = pos.character
 			}
+
+			body = append(body, theRune)
 
 		}
 		body = append(body, '\n')
@@ -294,4 +329,36 @@ func loadMap(path string) map[string]*position {
 	}
 
 	return theMap
+}
+
+func loadModal(s string) map[string]rune {
+	m := make(map[string]rune)
+	x, y := 0, 0
+	lines := strings.Split(s, "\n")
+	for _, line := range lines {
+		y++
+		x = 0
+		for _, r := range line {
+			x++
+			m[fmt.Sprintf("%d,%d", x, y)] = r
+		}
+	}
+	// log.Println(x, y, m)
+	return m
+}
+
+func help() string {
+	return `
+┌────────────────────┐
+│ Help               │▒
+│ Basic info         │▒
+╞════════════════════╡▒
+│ Each command must  │▒
+│ be started with ":"│▒
+│ Currently supported│▒
+│ commands are: help,│▒
+│ clear, resize ...  │▒
+└────────────────────┘▒
+ ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+`
 }
