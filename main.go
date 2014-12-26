@@ -19,7 +19,7 @@ type user struct {
 	viewPortX     int
 	viewPortY     int
 	modal         map[string]rune
-	killModal     chan bool
+	activeModal   string
 	energy        int // limit actions to energy
 	life          int
 	deaths        int
@@ -131,6 +131,7 @@ func receiveCommand(listener chan command) http.HandlerFunc {
 		result := <-cmdResult
 
 		w.WriteHeader(result.statusCode)
+		w.Write([]byte(result.message))
 	}
 }
 
@@ -158,7 +159,8 @@ func gameRunner(wrld *world, listener chan command) {
 
 func (wrld *world) createUser(userID string, width, height int) {
 	startingPosition := position{x: 2, y: 3}
-
+	maxLife := 3
+	maxEnergey := 150
 	if _, found := wrld.users[userID]; !found {
 		log.Println("New user", userID)
 		wrld.users[userID] = user{
@@ -167,9 +169,38 @@ func (wrld *world) createUser(userID string, width, height int) {
 			viewPortX: width,
 			viewPortY: height,
 			modal:     loadModal(help()),
-			life:      5,
+			life:      maxLife,
+			energy:    maxEnergey / 10,
 		}
+		// todo: check for idle users and terminate their go routines
+
+		go func(w *world, userID string) {
+			for {
+				select {
+				case <-time.Tick(time.Second * 5):
+					tmpUser := w.users[userID]
+					if tmpUser.life < maxLife {
+						tmpUser.life++
+					}
+					w.users[userID] = tmpUser
+				}
+			}
+		}(wrld, userID)
+
+		go func(w *world, userID string) {
+			for {
+				select {
+				case <-time.Tick(time.Millisecond * 500):
+					tmpUser := w.users[userID]
+					if tmpUser.energy < maxEnergey {
+						tmpUser.energy++
+					}
+					w.users[userID] = tmpUser
+				}
+			}
+		}(wrld, userID)
 	}
+
 }
 
 func (wrld *world) updateBoard() {
@@ -187,19 +218,20 @@ func (wrld *world) updateBoard() {
 
 		if cmd.cmd[0] == '>' {
 			statusCode := http.StatusOK
+			message := ""
 			log.Println("command processing")
 			thisCmd := strings.ToLower(strings.TrimSpace(cmd.cmd[1:]))
 			cmdPart := strings.Split(thisCmd, " ")
 			switch cmdPart[0] {
 			case "help":
 				tmpUser := wrld.users[cmd.userID]
-				tmpUser.killModal <- true
+				tmpUser.activeModal = "help"
 				tmpUser.modal = loadModal(help())
 				wrld.users[cmd.userID] = tmpUser
 
 			case "clear":
 				tmpUser := wrld.users[cmd.userID]
-				tmpUser.killModal <- true
+				tmpUser.activeModal = ""
 				tmpUser.modal = loadModal("")
 				wrld.users[cmd.userID] = tmpUser
 
@@ -218,6 +250,7 @@ func (wrld *world) updateBoard() {
 					// do ...
 					tmpUser := w.users[userID]
 					tmpUser.modal = loadModal(tmpUser.profileModal())
+					tmpUser.activeModal = "profile"
 					wrld.users[userID] = tmpUser
 					// while ...
 					for {
@@ -225,16 +258,29 @@ func (wrld *world) updateBoard() {
 						case <-time.Tick(time.Millisecond * 1000):
 							// may need a mutex
 							tmpUser := w.users[userID]
+							if tmpUser.activeModal != "profile" {
+								return
+							}
 							tmpUser.modal = loadModal(tmpUser.profileModal())
 							wrld.users[userID] = tmpUser
-						case <-w.users[userID].killModal:
-							return
 						}
 					}
 				}(wrld, cmd.userID)
 			case "attack":
 				// get all units in range and deal damage
 				// if their life falls to >0, recreate them
+				attackEnergy := 25
+				if wrld.users[cmd.userID].energy < attackEnergy {
+					message = "Not enough energy"
+					cmd.result <- commandStatus{statusCode: statusCode, message: message}
+
+					continue
+				}
+
+				tmpUser := wrld.users[cmd.userID]
+				tmpUser.energy -= attackEnergy
+				wrld.users[cmd.userID] = tmpUser
+
 				x, y := wrld.users[cmd.userID].position.x, wrld.users[cmd.userID].position.y
 				log.Printf("user %s at (%d,%d) attack", cmd.userID, x, y)
 				for i := x - 1; i <= x+1; i++ {
@@ -271,7 +317,7 @@ func (wrld *world) updateBoard() {
 				statusCode = http.StatusNotImplemented
 			}
 			// a console command demands a response
-			cmd.result <- commandStatus{statusCode: statusCode}
+			cmd.result <- commandStatus{statusCode: statusCode, message: message}
 			continue
 		}
 		// all other commands just need to not block
