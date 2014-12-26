@@ -19,6 +19,10 @@ type user struct {
 	viewPortX     int
 	viewPortY     int
 	modal         map[string]rune
+	killModal     chan bool
+	energy        int // limit actions to energy
+	life          int
+	deaths        int
 }
 
 type position struct {
@@ -35,6 +39,13 @@ func (p position) String() string {
 
 type command struct {
 	cmd, userID string
+	result      chan commandStatus
+}
+
+type commandStatus struct {
+	err        error
+	message    string
+	statusCode int
 }
 
 type world struct {
@@ -114,7 +125,12 @@ func receiveCommand(listener chan command) http.HandlerFunc {
 			return
 		}
 
-		listener <- command{cmd: cmd, userID: userID}
+		cmdResult := make(chan commandStatus)
+		listener <- command{cmd: cmd, userID: userID, result: cmdResult}
+
+		result := <-cmdResult
+
+		w.WriteHeader(result.statusCode)
 	}
 }
 
@@ -145,7 +161,14 @@ func (wrld *world) createUser(userID string, width, height int) {
 
 	if _, found := wrld.users[userID]; !found {
 		log.Println("New user", userID)
-		wrld.users[userID] = user{userID: userID, position: startingPosition, viewPortX: width, viewPortY: height, modal: loadModal(help())}
+		wrld.users[userID] = user{
+			userID:    userID,
+			position:  startingPosition,
+			viewPortX: width,
+			viewPortY: height,
+			modal:     loadModal(help()),
+			life:      5,
+		}
 	}
 }
 
@@ -163,17 +186,20 @@ func (wrld *world) updateBoard() {
 		log.Println(cmd)
 
 		if cmd.cmd[0] == '>' {
+			statusCode := http.StatusOK
 			log.Println("command processing")
 			thisCmd := strings.ToLower(strings.TrimSpace(cmd.cmd[1:]))
 			cmdPart := strings.Split(thisCmd, " ")
 			switch cmdPart[0] {
 			case "help":
 				tmpUser := wrld.users[cmd.userID]
+				tmpUser.killModal <- true
 				tmpUser.modal = loadModal(help())
 				wrld.users[cmd.userID] = tmpUser
 
 			case "clear":
 				tmpUser := wrld.users[cmd.userID]
+				tmpUser.killModal <- true
 				tmpUser.modal = loadModal("")
 				wrld.users[cmd.userID] = tmpUser
 
@@ -187,10 +213,69 @@ func (wrld *world) updateBoard() {
 					tmpUser.viewPortY = height
 					wrld.users[cmd.userID] = tmpUser
 				}
+			case "profile":
+				go func(w *world, userID string) {
+					// do ...
+					tmpUser := w.users[userID]
+					tmpUser.modal = loadModal(tmpUser.profileModal())
+					wrld.users[userID] = tmpUser
+					// while ...
+					for {
+						select {
+						case <-time.Tick(time.Millisecond * 1000):
+							// may need a mutex
+							tmpUser := w.users[userID]
+							tmpUser.modal = loadModal(tmpUser.profileModal())
+							wrld.users[userID] = tmpUser
+						case <-w.users[userID].killModal:
+							return
+						}
+					}
+				}(wrld, cmd.userID)
+			case "attack":
+				// get all units in range and deal damage
+				// if their life falls to >0, recreate them
+				x, y := wrld.users[cmd.userID].position.x, wrld.users[cmd.userID].position.y
+				log.Printf("user %s at (%d,%d) attack", cmd.userID, x, y)
+				for i := x - 1; i <= x+1; i++ {
+					for j := y - 1; j <= y+1; j++ {
+						if !(i == x && j == y) {
+							// don't damage current user
+							curPos := fmt.Sprintf("%d,%d", i, j)
+							if pos, ok := wrld.locations[0].positions[curPos]; ok {
+								if pos.userID != "" {
+									tmp_user := wrld.users[pos.userID]
+									tmp_user.life--
+									wrld.users[pos.userID] = tmp_user
+									if wrld.users[pos.userID].life <= 0 {
+										// plase damaged user at start
+										tmp_user := wrld.users[pos.userID]
+										tmp_user.position.x = 2
+										tmp_user.position.y = 3
+										tmp_user.deaths++
+										tmp_user.life = 5
+										wrld.users[pos.userID] = tmp_user
+										// clear out the previous cell
+										tmp_pos := wrld.locations[0].positions[curPos]
+										tmp_pos.character = ' '
+										tmp_pos.closed = false
+										tmp_pos.userID = ""
+										wrld.locations[0].positions[curPos] = tmp_pos
+									}
+								}
+							}
+						}
+					}
+				}
+			default:
+				statusCode = http.StatusNotImplemented
 			}
-
+			// a console command demands a response
+			cmd.result <- commandStatus{statusCode: statusCode}
 			continue
 		}
+		// all other commands just need to not block
+		cmd.result <- commandStatus{statusCode: http.StatusOK}
 
 		curPos := wrld.users[cmd.userID].position
 		newPos := applyMove(curPos, cmd.cmd)
@@ -221,6 +306,7 @@ func (wrld *world) updateBoard() {
 		tmp_b.closed = true
 		tmp_b.userID = cmd.userID
 		wrld.locations[0].positions[newPos.String()] = tmp_b
+
 	}
 
 	// clear the played through commands
@@ -349,16 +435,31 @@ func loadModal(s string) map[string]rune {
 
 func help() string {
 	return `
-┌────────────────────┐
-│ Help               │▒
-│ Basic info         │▒
-╞════════════════════╡▒
-│ Each command must  │▒
-│ be started with ":"│▒
-│ Currently supported│▒
-│ commands are: help,│▒
-│ clear, resize ...  │▒
-└────────────────────┘▒
- ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+┌──────────────────────────────┐
+│ Help                         │▒
+│ Basic info                   │▒
+╞══════════════════════════════╡▒
+│ Each command must be started │▒
+│ with ":".                    │▒
+│                              │▒
+│ - help   - clear    - resize │▒
+│ - attack - . (redo) - profile│▒
+│                              │▒
+└──────────────────────────────┘▒
+ ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
 `
+}
+
+func (u *user) profileModal() string {
+	return fmt.Sprintf(`
+┌─────────────────────────────┐
+│ User Info      %12s │▒
+╞═════════════════════════════╡▒
+│ Life:   %3d                 │▒
+│ Energy: %3d                 │▒
+│ Deaths: %3d                 │▒
+│                             │▒
+└─────────────────────────────┘▒
+ ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+`, u.userID, u.life, u.energy, u.deaths)
 }
