@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -23,6 +24,7 @@ type user struct {
 	energy        int // limit actions to energy
 	life          int
 	deaths        int
+	character     rune
 }
 
 type position struct {
@@ -163,6 +165,11 @@ func (wrld *world) createUser(userID string, width, height int) {
 	maxEnergey := 150
 	if _, found := wrld.users[userID]; !found {
 		log.Println("New user", userID)
+
+		rand.Seed(time.Now().Unix())
+		characters := []rune{'◊', 'ᐉ', 'ᛤ', '៙', '⁖', '⁘', '⁙', '⊙', '⍾', '⎔', '⎊', '⎈', '◈', '☆', '☃', '☢', '☣', '♀', '♂', '⚉', '♜', '⛄'}
+		randChar := characters[rand.Intn(len(characters))]
+
 		wrld.users[userID] = user{
 			userID:    userID,
 			position:  startingPosition,
@@ -171,6 +178,7 @@ func (wrld *world) createUser(userID string, width, height int) {
 			modal:     loadModal(help()),
 			life:      maxLife,
 			energy:    maxEnergey / 10,
+			character: randChar,
 		}
 		// todo: check for idle users and terminate their go routines
 
@@ -337,21 +345,25 @@ func (wrld *world) updateBoard() {
 
 		// https://github.com/golang/go/issues/3117
 		// cannot yet assign to a field of a map indirectly
-		tmp_a := wrld.users[cmd.userID]
-		tmp_a.position = newPos
-		wrld.users[cmd.userID] = tmp_a
+		tmpUser := wrld.users[cmd.userID]
+		if tmpUser.energy <= 0 {
+			continue
+		}
+		tmpUser.position = newPos
+		tmpUser.energy--
+		wrld.users[cmd.userID] = tmpUser
 
 		// update former/current position first. new pos may overwrite it,
 		// and we want to keep the most current information
-		tmp_c := wrld.locations[0].positions[curPos.String()]
-		tmp_c.closed = false
-		tmp_c.userID = ""
-		wrld.locations[0].positions[curPos.String()] = tmp_c
+		tmpPosA := wrld.locations[0].positions[curPos.String()]
+		tmpPosA.closed = false
+		tmpPosA.userID = ""
+		wrld.locations[0].positions[curPos.String()] = tmpPosA
 
-		tmp_b := wrld.locations[0].positions[newPos.String()]
-		tmp_b.closed = true
-		tmp_b.userID = cmd.userID
-		wrld.locations[0].positions[newPos.String()] = tmp_b
+		tmpPosB := wrld.locations[0].positions[newPos.String()]
+		tmpPosB.closed = true
+		tmpPosB.userID = cmd.userID
+		wrld.locations[0].positions[newPos.String()] = tmpPosB
 
 	}
 
@@ -390,7 +402,7 @@ func (wrld *world) display(uid string, width, height int) []byte {
 				theRune = '·'
 			} else if pos.userID != "" {
 				// todo: depending on user class, use different symbols and colors
-				theRune = '◊'
+				theRune = wrld.users[pos.userID].character
 			} else {
 				theRune = pos.character
 			}
@@ -499,7 +511,7 @@ func help() string {
 func (u *user) profileModal() string {
 	return fmt.Sprintf(`
 ┌─────────────────────────────┐
-│ User Info      %12s │▒
+│ User Info    %12s %3c │▒
 ╞═════════════════════════════╡▒
 │ Life:   %3d                 │▒
 │ Energy: %3d                 │▒
@@ -507,5 +519,5 @@ func (u *user) profileModal() string {
 │                             │▒
 └─────────────────────────────┘▒
  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-`, u.userID, u.life, u.energy, u.deaths)
+`, u.userID, u.character, u.life, u.energy, u.deaths)
 }
