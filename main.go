@@ -11,6 +11,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/davecheney/profile"
+
+	_ "net/http/pprof"
 )
 
 type user struct {
@@ -25,6 +29,7 @@ type user struct {
 	life          int
 	deaths        int
 	character     rune
+	lastCommand   time.Time
 }
 
 type position struct {
@@ -69,6 +74,7 @@ type location struct {
 
 func main() {
 	log.Println("Starting")
+	defer profile.Start(profile.CPUProfile).Stop()
 
 	listener := make(chan command)
 
@@ -80,7 +86,7 @@ func main() {
 	}
 	commands := make([]command, 0)
 	w := &world{locations: loc,
-		capacity: 10,
+		capacity: 10, // not currently honored
 		commands: commands,
 		users:    make(map[string]user),
 	}
@@ -95,10 +101,15 @@ func main() {
 
 	log.Println("Listening on :8888")
 
+	// go func() {
 	err := http.ListenAndServe(":8888", nil)
 	if err != nil {
 		log.Fatal(err)
 	}
+	// }()
+
+	//<-time.Tick(time.Minute * 1)
+
 }
 
 func getWorld(wrld *world) http.HandlerFunc {
@@ -127,6 +138,7 @@ func receiveCommand(listener chan command) http.HandlerFunc {
 			return
 		}
 
+		// HEAP? could the compiler hold onto cmdResult references?
 		cmdResult := make(chan commandStatus)
 		listener <- command{cmd: cmd, userID: userID, result: cmdResult}
 
@@ -150,11 +162,9 @@ func gameRunner(wrld *world, listener chan command) {
 	}()
 
 	go func() {
-		for {
-			select {
-			case <-time.Tick(time.Millisecond * 100):
-				wrld.updateBoard()
-			}
+		c := time.Tick(time.Millisecond * 100)
+		for _ = range c {
+			wrld.updateBoard()
 		}
 	}()
 }
@@ -171,40 +181,44 @@ func (wrld *world) createUser(userID string, width, height int) {
 		randChar := characters[rand.Intn(len(characters))]
 
 		wrld.users[userID] = user{
-			userID:    userID,
-			position:  startingPosition,
-			viewPortX: width,
-			viewPortY: height,
-			modal:     loadModal(help()),
-			life:      maxLife,
-			energy:    maxEnergey / 10,
-			character: randChar,
+			userID:      userID,
+			position:    startingPosition,
+			viewPortX:   width,
+			viewPortY:   height,
+			modal:       loadModal(help()),
+			life:        maxLife,
+			energy:      maxEnergey / 10,
+			character:   randChar,
+			lastCommand: time.Now(),
 		}
-		// todo: check for idle users and terminate their go routines
 
+		// todo - instead of passing in the world, pass in a channel tied to this user
+		// the the user can have its own for select goro that takes in mutations to the user
 		go func(w *world, userID string) {
-			for {
-				select {
-				case <-time.Tick(time.Second * 5):
-					tmpUser := w.users[userID]
-					if tmpUser.life < maxLife {
-						tmpUser.life++
-					}
-					w.users[userID] = tmpUser
+			c := time.Tick(time.Second * 5)
+			for _ = range c {
+				tmpUser := w.users[userID]
+				if tmpUser.lastCommand.Add(time.Minute*20).Unix() < time.Now().Unix() {
+					return
 				}
+				if tmpUser.life < maxLife {
+					tmpUser.life++
+				}
+				w.users[userID] = tmpUser
 			}
 		}(wrld, userID)
 
 		go func(w *world, userID string) {
-			for {
-				select {
-				case <-time.Tick(time.Millisecond * 500):
-					tmpUser := w.users[userID]
-					if tmpUser.energy < maxEnergey {
-						tmpUser.energy++
-					}
-					w.users[userID] = tmpUser
+			c := time.Tick(time.Millisecond * 500)
+			for _ = range c {
+				tmpUser := w.users[userID]
+				if tmpUser.lastCommand.Add(time.Minute*20).Unix() < time.Now().Unix() {
+					return
 				}
+				if tmpUser.energy < maxEnergey {
+					tmpUser.energy++
+				}
+				w.users[userID] = tmpUser
 			}
 		}(wrld, userID)
 	}
@@ -261,17 +275,14 @@ func (wrld *world) updateBoard() {
 					tmpUser.activeModal = "profile"
 					wrld.users[userID] = tmpUser
 					// while ...
-					for {
-						select {
-						case <-time.Tick(time.Millisecond * 1000):
-							// may need a mutex
-							tmpUser := w.users[userID]
-							if tmpUser.activeModal != "profile" {
-								return
-							}
-							tmpUser.modal = loadModal(tmpUser.profileModal())
-							wrld.users[userID] = tmpUser
+					c := time.Tick(time.Millisecond * 500)
+					for _ = range c {
+						tmpUser := w.users[userID]
+						if tmpUser.activeModal != "profile" {
+							return
 						}
+						tmpUser.modal = loadModal(tmpUser.profileModal())
+						wrld.users[userID] = tmpUser
 					}
 				}(wrld, cmd.userID)
 			case "attack":
