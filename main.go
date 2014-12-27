@@ -18,18 +18,21 @@ import (
 )
 
 type user struct {
-	userID        string
 	locationIndex int
 	position      position
 	viewPortX     int
 	viewPortY     int
 	modal         map[string]rune
 	activeModal   string
-	energy        int // limit actions to energy
-	life          int
-	deaths        int
-	character     rune
 	lastCommand   time.Time
+	commChan      chan string // not yet in use
+	killChan      chan bool
+
+	userID    string
+	energy    int
+	life      int
+	deaths    int
+	character rune
 }
 
 type position struct {
@@ -124,9 +127,11 @@ func getWorld(wrld *world) http.HandlerFunc {
 
 func receiveCommand(listener chan command) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cmd := r.FormValue("key")
-		userID := r.FormValue("uid")
+		cmd := strings.TrimSpace(r.FormValue("key"))
+		userID := strings.TrimSpace(r.FormValue("uid"))
+
 		// validate
+		// todo - userID vs userName (nonce vs human readable)
 		if userID == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte("provide a uid string"))
@@ -174,37 +179,70 @@ func (wrld *world) createUser(userID string, width, height int) {
 	maxLife := 3
 	maxEnergey := 150
 	if _, found := wrld.users[userID]; !found {
-		log.Println("New user", userID)
+		log.Printf("New user - '%s'", userID)
 
 		rand.Seed(time.Now().Unix())
 		characters := []rune{'◊', 'ᐉ', 'ᛤ', '៙', '⁖', '⁘', '⁙', '⊙', '⍾', '⎔', '⎊', '⎈', '◈', '☆', '☃', '☢', '☣', '♀', '♂', '⚉', '♜', '⛄'}
 		randChar := characters[rand.Intn(len(characters))]
 
+		comm := make(chan string)
+		kill := make(chan bool)
+
 		wrld.users[userID] = user{
-			userID:      userID,
 			position:    startingPosition,
 			viewPortX:   width,
 			viewPortY:   height,
-			modal:       loadModal(help()),
-			life:        maxLife,
-			energy:      maxEnergey / 10,
-			character:   randChar,
 			lastCommand: time.Now(),
+			commChan:    comm,
+			killChan:    kill,
+
+			modal:     loadModal(help()),
+			userID:    userID,
+			life:      maxLife,
+			energy:    maxEnergey / 10,
+			character: randChar,
 		}
 
 		// todo - instead of passing in the world, pass in a channel tied to this user
 		// the the user can have its own for select goro that takes in mutations to the user
+
+		go func(w *world, userID string) {
+			dur := time.Minute * 10
+			c := time.Tick(dur)
+			for _ = range c {
+				if time.Now().Unix() > w.users[userID].lastCommand.Add(dur).Unix() {
+					log.Println("Inactive", userID)
+					close(w.users[userID].killChan)
+					time.Sleep(time.Second * 1)
+
+					pos := w.users[userID].position.String()
+					delete(w.users, userID)
+
+					tmpPos := w.locations[0].positions[pos]
+					tmpPos.character = ' '
+					tmpPos.closed = false
+					tmpPos.userID = ""
+					w.locations[0].positions[pos] = tmpPos
+					return
+				}
+			}
+		}(wrld, userID)
+
 		go func(w *world, userID string) {
 			c := time.Tick(time.Second * 5)
 			for _ = range c {
 				tmpUser := w.users[userID]
-				if tmpUser.lastCommand.Add(time.Minute*20).Unix() < time.Now().Unix() {
-					return
+				select {
+				case _, ok := <-w.users[userID].killChan:
+					if !ok {
+						return
+					}
+				default:
+					if tmpUser.life < maxLife {
+						tmpUser.life++
+					}
+					w.users[userID] = tmpUser
 				}
-				if tmpUser.life < maxLife {
-					tmpUser.life++
-				}
-				w.users[userID] = tmpUser
 			}
 		}(wrld, userID)
 
@@ -212,13 +250,17 @@ func (wrld *world) createUser(userID string, width, height int) {
 			c := time.Tick(time.Millisecond * 500)
 			for _ = range c {
 				tmpUser := w.users[userID]
-				if tmpUser.lastCommand.Add(time.Minute*20).Unix() < time.Now().Unix() {
-					return
+				select {
+				case _, ok := <-w.users[userID].killChan:
+					if !ok {
+						return
+					}
+				default:
+					if tmpUser.energy < maxEnergey {
+						tmpUser.energy++
+					}
+					w.users[userID] = tmpUser
 				}
-				if tmpUser.energy < maxEnergey {
-					tmpUser.energy++
-				}
-				w.users[userID] = tmpUser
 			}
 		}(wrld, userID)
 	}
@@ -237,6 +279,12 @@ func (wrld *world) updateBoard() {
 	log.Println("Commands:")
 	for _, cmd := range wrld.commands {
 		log.Println(cmd)
+
+		{
+			tmpUser := wrld.users[cmd.userID]
+			tmpUser.lastCommand = time.Now()
+			wrld.users[cmd.userID] = tmpUser
+		}
 
 		if cmd.cmd[0] == '>' {
 			statusCode := http.StatusOK
@@ -340,6 +388,7 @@ func (wrld *world) updateBoard() {
 			continue
 		}
 		// all other commands just need to not block
+		// could move this above each continue to give feedback to clients
 		cmd.result <- commandStatus{statusCode: http.StatusOK}
 
 		curPos := wrld.users[cmd.userID].position
@@ -347,6 +396,9 @@ func (wrld *world) updateBoard() {
 
 		if _, ok := wrld.locations[0].positions[newPos.String()]; !ok {
 			log.Printf("attempted location is non existant")
+			if curPos.String() == "0,0" {
+				log.Println("attempting to move non-existant user?")
+			}
 			continue
 		}
 		if wrld.locations[0].positions[newPos.String()].closed {
