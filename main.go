@@ -238,7 +238,7 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 			if time.Now().Unix() > w.users[userID].lastCommand.Add(dur).Unix() {
 				log.Println("Inactive", userID)
 				close(w.users[userID].killChan)
-				time.Sleep(time.Second * 1)
+				//time.Sleep(time.Second * 1)
 
 				pos := w.users[userID].position.String()
 				delete(w.users, userID)
@@ -297,6 +297,23 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 
 				// check if user is close by and attack
 				// but make monsters unable to attack monsters
+
+				x, y := wrld.users[mID].position.x, wrld.users[mID].position.y
+				for i := x - 1; i <= x+1; i++ {
+					for j := y - 1; j <= y+1; j++ {
+						if !(i == x && j == y) {
+							cell := fmt.Sprintf("%d,%d", i, j)
+							opponentID := wrld.locations[0].positions[cell].userID
+							if opponentID != "" && !wrld.users[opponentID].isNPC {
+								_, err := http.Get(fmt.Sprintf("http://localhost:8888/cmd?uid=%s&key=>attack", mID))
+								if err != nil {
+									log.Println(err)
+								}
+								continue
+							}
+						}
+					}
+				}
 
 				// move in random direction or (todo) towards user
 				direction := ""
@@ -396,7 +413,7 @@ func (wrld *world) updateBoard() {
 			case "attack":
 				// get all units in range and deal damage
 				// if their life falls to >0, recreate them
-				attackEnergy := 25
+				attackEnergy := 15
 				if wrld.users[cmd.userID].energy < attackEnergy {
 					message = "Not enough energy"
 					cmd.result <- commandStatus{statusCode: statusCode, message: message}
@@ -648,5 +665,5 @@ func (u *user) profileModal() string {
 │                             │▒
 └─────────────────────────────┘▒
  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-`, u.userID, u.character, u.life, u.energy, u.deaths, u.kills)
+`, u.userID, u.character, u.life, u.deaths, u.energy, u.kills)
 }
