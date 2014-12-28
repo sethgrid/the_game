@@ -18,29 +18,23 @@ import (
 )
 
 type user struct {
-	locationIndex int
-	position      position
-	viewPortX     int
-	viewPortY     int
-	modal         map[string]rune
-	activeModal   string
-	lastCommand   time.Time
-	commChan      chan string // not yet in use
-	killChan      chan bool
+	userID      string
+	ID          int
+	viewPortX   int
+	viewPortY   int
+	position    position
+	killChan    chan bool
+	commChan    chan string // not yet in use
+	modal       map[string]rune
+	activeModal string
+	lastCommand time.Time
 
-	userID    string
+	isNPC     bool
 	energy    int
 	life      int
 	deaths    int
+	kills     int
 	character rune
-}
-
-type position struct {
-	x, y        int
-	closed      bool
-	description string
-	character   rune
-	userID      string
 }
 
 func (p position) String() string {
@@ -48,8 +42,8 @@ func (p position) String() string {
 }
 
 type command struct {
-	cmd, userID string
-	result      chan commandStatus
+	cmd, userID, monsterID string
+	result                 chan commandStatus
 }
 
 type commandStatus struct {
@@ -75,12 +69,39 @@ type location struct {
 	sync.Mutex
 }
 
+type position struct {
+	x, y        int
+	closed      bool
+	description string
+	character   rune
+	userID      string
+}
+
 func main() {
 	log.Println("Starting")
 	defer profile.Start(profile.CPUProfile).Stop()
 
 	listener := make(chan command)
 
+	w := genWorld()
+
+	go gameRunner(w, listener)
+
+	http.HandleFunc("/", getWorld(w))
+	http.HandleFunc("/cmd", receiveCommand(listener))
+
+	log.Println("Registered /")
+	log.Println("Registered /cmd?uid=[string]&key=[char]")
+
+	log.Println("Listening on :8888")
+
+	err := http.ListenAndServe(":8888", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func genWorld() *world {
 	loc := make([]location, 1)
 	loc[0] = location{
 		description: "init location",
@@ -94,25 +115,27 @@ func main() {
 		users:    make(map[string]user),
 	}
 
-	go gameRunner(w, listener)
-
-	http.HandleFunc("/", getWorld(w))
-	http.HandleFunc("/cmd", receiveCommand(listener))
-
-	log.Println("Registered /")
-	log.Println("Registered /cmd?uid=[string]&key=[char]")
-
-	log.Println("Listening on :8888")
-
-	// go func() {
-	err := http.ListenAndServe(":8888", nil)
-	if err != nil {
-		log.Fatal(err)
+	// spawn monsters
+	saturationRate := 4
+	opens := make([]*position, 0)
+	openCount := 0
+	// todo - don't count user spawn area as open
+	for _, pos := range w.locations[0].positions {
+		if pos.closed == false {
+			openCount++
+			opens = append(opens, pos)
+		}
 	}
-	// }()
+	rand.Seed(time.Now().Unix())
+	for monsterCount := saturationRate * openCount / 100; monsterCount >= 0; monsterCount-- {
+		idx := rand.Intn(len(opens))
+		pos := opens[idx]
 
-	//<-time.Tick(time.Minute * 1)
+		randInt := rand.Intn(2000000000)
 
+		w.createUser(strconv.Itoa(randInt), 80, 20, *pos, true)
+	}
+	return w
 }
 
 func getWorld(wrld *world) http.HandlerFunc {
@@ -120,7 +143,7 @@ func getWorld(wrld *world) http.HandlerFunc {
 		// todo sanitize
 		width, _ := strconv.Atoi(r.FormValue("w"))
 		height, _ := strconv.Atoi(r.FormValue("h"))
-		wrld.createUser(r.FormValue("uid"), width, height)
+		wrld.createUser(r.FormValue("uid"), width, height, position{x: 2, y: 3}, false)
 		w.Write(wrld.display(r.FormValue("uid"), width, height))
 	}
 }
@@ -129,6 +152,7 @@ func receiveCommand(listener chan command) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cmd := strings.TrimSpace(r.FormValue("key"))
 		userID := strings.TrimSpace(r.FormValue("uid"))
+		monsterID := strings.TrimSpace(r.FormValue("mid"))
 
 		// validate
 		// todo - userID vs userName (nonce vs human readable)
@@ -145,7 +169,7 @@ func receiveCommand(listener chan command) http.HandlerFunc {
 
 		// HEAP? could the compiler hold onto cmdResult references?
 		cmdResult := make(chan commandStatus)
-		listener <- command{cmd: cmd, userID: userID, result: cmdResult}
+		listener <- command{cmd: cmd, userID: userID, monsterID: monsterID, result: cmdResult}
 
 		result := <-cmdResult
 
@@ -174,97 +198,135 @@ func gameRunner(wrld *world, listener chan command) {
 	}()
 }
 
-func (wrld *world) createUser(userID string, width, height int) {
-	startingPosition := position{x: 2, y: 3}
+func (wrld *world) createUser(userID string, width, height int, startingPosition position, isNPC bool) {
+	if _, found := wrld.users[userID]; found {
+		return
+	}
+	log.Printf("New user '%s' (%d,%d)", userID, startingPosition.x, startingPosition.y)
+
 	maxLife := 3
 	maxEnergey := 150
-	if _, found := wrld.users[userID]; !found {
-		log.Printf("New user - '%s'", userID)
+	rand.Seed(int64(time.Now().Nanosecond()))
+	characters := []rune{'◊', 'ᐉ', 'ᛤ', '៙', '⁖', '⁘', '⁙', '⊙', '⍾', '⎔', '⎊', '⎈', '◈', '☆', '☃', '☢', '☣', '♀', '♂', '⚉', '♜', '⛄'}
+	randChar := characters[rand.Intn(len(characters))]
 
-		rand.Seed(time.Now().Unix())
-		characters := []rune{'◊', 'ᐉ', 'ᛤ', '៙', '⁖', '⁘', '⁙', '⊙', '⍾', '⎔', '⎊', '⎈', '◈', '☆', '☃', '☢', '☣', '♀', '♂', '⚉', '♜', '⛄'}
-		randChar := characters[rand.Intn(len(characters))]
+	comm := make(chan string)
+	kill := make(chan bool)
 
-		comm := make(chan string)
-		kill := make(chan bool)
+	wrld.users[userID] = user{
+		position:    startingPosition,
+		viewPortX:   width,
+		viewPortY:   height,
+		commChan:    comm,
+		killChan:    kill,
+		energy:      maxEnergey / 10,
+		life:        maxLife,
+		character:   randChar,
+		isNPC:       isNPC,
+		lastCommand: time.Now(),
+		modal:       loadModal(help()),
+		userID:      userID,
+	}
 
-		wrld.users[userID] = user{
-			position:    startingPosition,
-			viewPortX:   width,
-			viewPortY:   height,
-			lastCommand: time.Now(),
-			commChan:    comm,
-			killChan:    kill,
+	// todo - instead of passing in the world, pass in a channel tied to this user
+	// the the user can have its own for select goro that takes in mutations to the user
 
-			modal:     loadModal(help()),
-			userID:    userID,
-			life:      maxLife,
-			energy:    maxEnergey / 10,
-			character: randChar,
+	go func(w *world, userID string) {
+		dur := time.Minute * 10
+		c := time.Tick(dur)
+		for _ = range c {
+			if time.Now().Unix() > w.users[userID].lastCommand.Add(dur).Unix() {
+				log.Println("Inactive", userID)
+				close(w.users[userID].killChan)
+				time.Sleep(time.Second * 1)
+
+				pos := w.users[userID].position.String()
+				delete(w.users, userID)
+
+				tmpPos := w.locations[0].positions[pos]
+				tmpPos.character = ' '
+				tmpPos.closed = false
+				tmpPos.userID = ""
+				w.locations[0].positions[pos] = tmpPos
+				return
+			}
 		}
+	}(wrld, userID)
 
-		// todo - instead of passing in the world, pass in a channel tied to this user
-		// the the user can have its own for select goro that takes in mutations to the user
+	go func(w *world, userID string) {
+		c := time.Tick(time.Second * 5)
+		for _ = range c {
+			tmpUser := w.users[userID]
+			select {
+			case _, ok := <-w.users[userID].killChan:
+				if !ok {
+					return
+				}
+			default:
+				if tmpUser.life < maxLife {
+					tmpUser.life++
+				}
+				w.users[userID] = tmpUser
+			}
+		}
+	}(wrld, userID)
 
-		go func(w *world, userID string) {
-			dur := time.Minute * 10
-			c := time.Tick(dur)
+	go func(w *world, userID string) {
+		c := time.Tick(time.Millisecond * 500)
+		for _ = range c {
+			tmpUser := w.users[userID]
+			select {
+			case _, ok := <-w.users[userID].killChan:
+				if !ok {
+					return
+				}
+			default:
+				if tmpUser.energy < maxEnergey {
+					tmpUser.energy++
+				}
+				w.users[userID] = tmpUser
+			}
+		}
+	}(wrld, userID)
+
+	if isNPC {
+		// todo - have a goro that handles this monster until it dies
+		go func(w *world, mID string) {
+			c := time.Tick(time.Second * 1)
 			for _ = range c {
-				if time.Now().Unix() > w.users[userID].lastCommand.Add(dur).Unix() {
-					log.Println("Inactive", userID)
-					close(w.users[userID].killChan)
-					time.Sleep(time.Second * 1)
 
-					pos := w.users[userID].position.String()
-					delete(w.users, userID)
+				// check if user is close by and attack
+				// but make monsters unable to attack monsters
 
-					tmpPos := w.locations[0].positions[pos]
+				// move in random direction or (todo) towards user
+				direction := ""
+				switch rand.Intn(4) {
+				case 0:
+					direction = "mw"
+				case 1:
+					direction = "ma"
+				case 2:
+					direction = "ms"
+				case 3:
+					direction = "md"
+				}
+				_, err := http.Get(fmt.Sprintf("http://localhost:8888/cmd?uid=%s&key=%s", mID, direction))
+				if err != nil {
+					log.Println(err)
+				}
+
+				if w.users[mID].deaths > 0 {
+					tmpPos := w.locations[0].positions[w.users[mID].position.String()]
 					tmpPos.character = ' '
-					tmpPos.closed = false
 					tmpPos.userID = ""
-					w.locations[0].positions[pos] = tmpPos
+					tmpPos.closed = false
+					w.locations[0].positions[w.users[mID].position.String()] = tmpPos
+					delete(w.users, mID)
 					return
 				}
 			}
 		}(wrld, userID)
-
-		go func(w *world, userID string) {
-			c := time.Tick(time.Second * 5)
-			for _ = range c {
-				tmpUser := w.users[userID]
-				select {
-				case _, ok := <-w.users[userID].killChan:
-					if !ok {
-						return
-					}
-				default:
-					if tmpUser.life < maxLife {
-						tmpUser.life++
-					}
-					w.users[userID] = tmpUser
-				}
-			}
-		}(wrld, userID)
-
-		go func(w *world, userID string) {
-			c := time.Tick(time.Millisecond * 500)
-			for _ = range c {
-				tmpUser := w.users[userID]
-				select {
-				case _, ok := <-w.users[userID].killChan:
-					if !ok {
-						return
-					}
-				default:
-					if tmpUser.energy < maxEnergey {
-						tmpUser.energy++
-					}
-					w.users[userID] = tmpUser
-				}
-			}
-		}(wrld, userID)
 	}
-
 }
 
 func (wrld *world) updateBoard() {
@@ -276,10 +338,7 @@ func (wrld *world) updateBoard() {
 		return
 	}
 
-	log.Println("Commands:")
 	for _, cmd := range wrld.commands {
-		log.Println(cmd)
-
 		{
 			tmpUser := wrld.users[cmd.userID]
 			tmpUser.lastCommand = time.Now()
@@ -287,6 +346,7 @@ func (wrld *world) updateBoard() {
 		}
 
 		if cmd.cmd[0] == '>' {
+			log.Println(cmd)
 			statusCode := http.StatusOK
 			message := ""
 			log.Println("command processing")
@@ -362,12 +422,20 @@ func (wrld *world) updateBoard() {
 									wrld.users[pos.userID] = tmp_user
 									if wrld.users[pos.userID].life <= 0 {
 										// plase damaged user at start
-										tmp_user := wrld.users[pos.userID]
-										tmp_user.position.x = 2
-										tmp_user.position.y = 3
-										tmp_user.deaths++
-										tmp_user.life = 5
-										wrld.users[pos.userID] = tmp_user
+										// todo: if isNPC - place is non existant location?
+										{
+											tmpUser := wrld.users[pos.userID]
+											tmpUser.position.x = 2
+											tmpUser.position.y = 3
+											tmpUser.deaths++
+											tmpUser.life = 5
+											wrld.users[pos.userID] = tmpUser
+										}
+										{
+											tmpUser := wrld.users[cmd.userID]
+											tmpUser.kills++
+											wrld.users[cmd.userID] = tmpUser
+										}
 										// clear out the previous cell
 										tmp_pos := wrld.locations[0].positions[curPos]
 										tmp_pos.character = ' '
@@ -395,14 +463,12 @@ func (wrld *world) updateBoard() {
 		newPos := applyMove(curPos, cmd.cmd)
 
 		if _, ok := wrld.locations[0].positions[newPos.String()]; !ok {
-			log.Printf("attempted location is non existant")
 			if curPos.String() == "0,0" {
 				log.Println("attempting to move non-existant user?")
 			}
 			continue
 		}
 		if wrld.locations[0].positions[newPos.String()].closed {
-			log.Printf("attempted location is closed (%s) -> (%s)\n", curPos.String(), newPos.String())
 			continue
 		}
 
@@ -432,7 +498,6 @@ func (wrld *world) updateBoard() {
 
 	// clear the played through commands
 	wrld.commands = make([]command, 0)
-	log.Println()
 }
 
 func (wrld *world) display(uid string, width, height int) []byte {
@@ -498,7 +563,6 @@ func applyMove(p position, s string) position {
 	case "md":
 		pNew.x++
 	}
-	log.Printf("old pos, %+v, new pos %+v", p, pNew)
 	return pNew
 }
 
@@ -556,18 +620,21 @@ func loadModal(s string) map[string]rune {
 
 func help() string {
 	return `
-┌──────────────────────────────┐
-│ Help                         │▒
-│ Basic info                   │▒
-╞══════════════════════════════╡▒
-│ Each command must be started │▒
-│ with ":".                    │▒
-│                              │▒
-│ - help   - clear    - resize │▒
-│ - attack - . (redo) - profile│▒
-│                              │▒
-└──────────────────────────────┘▒
- ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+┌──────────────────────────────────┐
+│ Help                             │▒
+│ Basic info                       │▒
+╞══════════════════════════════════╡▒
+│ Movement: w,a,s,d                │▒
+│ Attack: x                        │▒
+│                                  │▒
+│ Console commands must be started │▒
+│ with ":".                        │▒
+│                                  │▒
+│ - help   - clear    - resize     │▒
+│ - attack - . (redo) - profile    │▒
+│                                  │▒
+└──────────────────────────────────┘▒
+ ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
 `
 }
 
@@ -576,11 +643,10 @@ func (u *user) profileModal() string {
 ┌─────────────────────────────┐
 │ User Info    %12s %3c │▒
 ╞═════════════════════════════╡▒
-│ Life:   %3d                 │▒
-│ Energy: %3d                 │▒
-│ Deaths: %3d                 │▒
+│ Life:   %3d     Deaths: %3d │▒
+│ Energy: %3d     Kills:  %3d │▒
 │                             │▒
 └─────────────────────────────┘▒
  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-`, u.userID, u.character, u.life, u.energy, u.deaths)
+`, u.userID, u.character, u.life, u.energy, u.deaths, u.kills)
 }
