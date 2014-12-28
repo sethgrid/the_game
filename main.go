@@ -292,7 +292,8 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 	if isNPC {
 		// todo - have a goro that handles this monster until it dies
 		go func(w *world, mID string) {
-			c := time.Tick(time.Second * 1)
+			rDur := (time.Duration)(rand.Intn(1000) + 400)
+			c := time.Tick(time.Millisecond * rDur)
 			for _ = range c {
 
 				// check if user is close by and attack
@@ -302,9 +303,12 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 				for i := x - 1; i <= x+1; i++ {
 					for j := y - 1; j <= y+1; j++ {
 						if !(i == x && j == y) {
+							wrld.Lock()
 							cell := fmt.Sprintf("%d,%d", i, j)
 							opponentID := wrld.locations[0].positions[cell].userID
-							if opponentID != "" && !wrld.users[opponentID].isNPC {
+							isNPC := wrld.users[opponentID].isNPC
+							wrld.Unlock()
+							if opponentID != "" && !isNPC {
 								_, err := http.Get(fmt.Sprintf("http://localhost:8888/cmd?uid=%s&key=>attack", mID))
 								if err != nil {
 									log.Println(err)
@@ -366,7 +370,6 @@ func (wrld *world) updateBoard() {
 			log.Println(cmd)
 			statusCode := http.StatusOK
 			message := ""
-			log.Println("command processing")
 			thisCmd := strings.ToLower(strings.TrimSpace(cmd.cmd[1:]))
 			cmdPart := strings.Split(thisCmd, " ")
 			switch cmdPart[0] {
