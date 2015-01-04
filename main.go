@@ -110,13 +110,13 @@ func genWorld() *world {
 	}
 	commands := make([]command, 0)
 	w := &world{locations: loc,
-		capacity: 10, // not currently honored
+		capacity: 350, // TODO: testing on the mac. I think I'm leaking FDs. The bigger this number, the faster we crash
 		commands: commands,
 		users:    make(map[string]user),
 	}
 
 	// spawn monsters
-	saturationRate := 4
+	saturationRate := 8
 	opens := make([]*position, 0)
 	openCount := 0
 	// todo - don't count user spawn area as open
@@ -127,14 +127,18 @@ func genWorld() *world {
 		}
 	}
 	rand.Seed(time.Now().Unix())
+	created := 0
 	for monsterCount := saturationRate * openCount / 100; monsterCount >= 0; monsterCount-- {
 		idx := rand.Intn(len(opens))
 		pos := opens[idx]
 
 		randInt := rand.Intn(2000000000)
 
-		w.createUser(strconv.Itoa(randInt), 80, 20, *pos, true)
+		if w.createUser(strconv.Itoa(randInt), 80, 20, *pos, true) {
+			created++
+		}
 	}
+	log.Printf("spawned %d monsters", created)
 	return w
 }
 
@@ -143,8 +147,11 @@ func getWorld(wrld *world) http.HandlerFunc {
 		// todo sanitize
 		width, _ := strconv.Atoi(r.FormValue("w"))
 		height, _ := strconv.Atoi(r.FormValue("h"))
-		wrld.createUser(r.FormValue("uid"), width, height, position{x: 2, y: 3}, false)
-		w.Write(wrld.display(r.FormValue("uid"), width, height))
+		if wrld.createUser(r.FormValue("uid"), width, height, position{x: 2, y: 3}, false) {
+			w.Write(wrld.display(r.FormValue("uid"), width, height))
+		} else {
+			w.Write([]byte("unable to join, world is at capacity\n"))
+		}
 	}
 }
 
@@ -198,10 +205,13 @@ func gameRunner(wrld *world, listener chan command) {
 	}()
 }
 
-func (wrld *world) createUser(userID string, width, height int, startingPosition position, isNPC bool) {
+func (wrld *world) createUser(userID string, width, height int, startingPosition position, isNPC bool) bool {
 	if _, found := wrld.users[userID]; found {
-		return
+		return true
+	} else if len(wrld.users) >= wrld.capacity {
+		return false
 	}
+
 	log.Printf("New user '%s' (%d,%d)", userID, startingPosition.x, startingPosition.y)
 
 	maxLife := 3
@@ -290,7 +300,6 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 	}(wrld, userID)
 
 	if isNPC {
-		// todo - have a goro that handles this monster until it dies
 		go func(w *world, mID string) {
 			rDur := (time.Duration)(rand.Intn(1000) + 400)
 			c := time.Tick(time.Millisecond * rDur)
@@ -305,13 +314,21 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 						if !(i == x && j == y) {
 							wrld.Lock()
 							cell := fmt.Sprintf("%d,%d", i, j)
-							opponentID := wrld.locations[0].positions[cell].userID
+							opponentID := ""
+							if _, ok := wrld.locations[0].positions[cell]; ok {
+								opponentID = wrld.locations[0].positions[cell].userID
+							}
 							isNPC := wrld.users[opponentID].isNPC
 							wrld.Unlock()
 							if opponentID != "" && !isNPC {
-								_, err := http.Get(fmt.Sprintf("http://localhost:8888/cmd?uid=%s&key=>attack", mID))
+								resp, err := http.Get(fmt.Sprintf("http://localhost:8888/cmd?uid=%s&key=>attack", mID))
 								if err != nil {
 									log.Println(err)
+									if strings.Contains(err.Error(), "no such host") || strings.Contains(err.Error(), "can't assign requested address") {
+										time.Sleep(time.Second * 10)
+									}
+								} else {
+									resp.Body.Close()
 								}
 								continue
 							}
@@ -331,9 +348,14 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 				case 3:
 					direction = "md"
 				}
-				_, err := http.Get(fmt.Sprintf("http://localhost:8888/cmd?uid=%s&key=%s", mID, direction))
+				resp, err := http.Get(fmt.Sprintf("http://localhost:8888/cmd?uid=%s&key=%s", mID, direction))
 				if err != nil {
 					log.Println(err)
+					if strings.Contains(err.Error(), "no such host") {
+						time.Sleep(time.Second * 10)
+					}
+				} else {
+					resp.Body.Close()
 				}
 
 				if w.users[mID].deaths > 0 {
@@ -348,6 +370,8 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 			}
 		}(wrld, userID)
 	}
+
+	return true
 }
 
 func (wrld *world) updateBoard() {
@@ -397,6 +421,8 @@ func (wrld *world) updateBoard() {
 				}
 			case "profile":
 				go func(w *world, userID string) {
+					// todo: can you set up a doWhile package?
+					// pass in a func (?) bool (shrug)
 					// do ...
 					tmpUser := w.users[userID]
 					tmpUser.modal = loadModal(tmpUser.profileModal())
@@ -413,6 +439,11 @@ func (wrld *world) updateBoard() {
 						wrld.users[userID] = tmpUser
 					}
 				}(wrld, cmd.userID)
+			case "info":
+				tmpUser := wrld.users[cmd.userID]
+				tmpUser.activeModal = "help"
+				tmpUser.modal = loadModal(wrld.info())
+				wrld.users[cmd.userID] = tmpUser
 			case "attack":
 				// get all units in range and deal damage
 				// if their life falls to >0, recreate them
@@ -436,6 +467,7 @@ func (wrld *world) updateBoard() {
 							// don't damage current user
 							curPos := fmt.Sprintf("%d,%d", i, j)
 							if pos, ok := wrld.locations[0].positions[curPos]; ok {
+								go areaAttack(pos)
 								if pos.userID != "" {
 									tmp_user := wrld.users[pos.userID]
 									tmp_user.life--
@@ -518,6 +550,17 @@ func (wrld *world) updateBoard() {
 
 	// clear the played through commands
 	wrld.commands = make([]command, 0)
+}
+
+func areaAttack(pos *position) {
+	original := pos.character
+	if original != ' ' {
+		return
+	}
+	pos.character = '*'
+	<-time.Tick(time.Second * 1)
+
+	pos.character = original
 }
 
 func (wrld *world) display(uid string, width, height int) []byte {
@@ -636,6 +679,19 @@ func loadModal(s string) map[string]rune {
 	}
 	// log.Println(x, y, m)
 	return m
+}
+
+func (wrld *world) info() string {
+	return fmt.Sprintf(`
+┌────────────────┐
+│ World Info     │▒
+╞════════════════╡▒
+│ Users:    %3d  │▒
+│ Capacity: %3d  │▒
+│                │▒
+└────────────────┘▒
+ ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+`, len(wrld.users), wrld.capacity)
 }
 
 func help() string {
