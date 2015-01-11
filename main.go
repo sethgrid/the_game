@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,8 +60,9 @@ type world struct {
 	capacity  int
 
 	sync.Mutex
-	commands []command
-	users    map[string]user
+	commands    []command
+	users       map[string]user
+	connections int
 }
 
 type location struct {
@@ -80,6 +84,10 @@ type position struct {
 func main() {
 	log.Println("Starting")
 	defer profile.Start(profile.CPUProfile).Stop()
+
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 100
 
 	listener := make(chan command)
 
@@ -106,17 +114,17 @@ func genWorld() *world {
 	loc[0] = location{
 		description: "init location",
 		display:     []byte("some map"),
-		positions:   loadMap("maps/map_1.map"),
+		positions:   loadMap("maps/map_2.map"),
 	}
 	commands := make([]command, 0)
 	w := &world{locations: loc,
-		capacity: 350, // TODO: testing on the mac. I think I'm leaking FDs. The bigger this number, the faster we crash
+		capacity: 5000, // TODO: testing on the mac. I think I'm leaking FDs. The bigger this number, the faster we crash
 		commands: commands,
 		users:    make(map[string]user),
 	}
 
 	// spawn monsters
-	saturationRate := 8
+	saturationRate := 80
 	opens := make([]*position, 0)
 	openCount := 0
 	// todo - don't count user spawn area as open
@@ -247,7 +255,9 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 		for _ = range c {
 			if time.Now().Unix() > w.users[userID].lastCommand.Add(dur).Unix() {
 				log.Println("Inactive", userID)
-				close(w.users[userID].killChan)
+				if _, ok := <-w.users[userID].killChan; ok {
+					close(w.users[userID].killChan)
+				}
 				//time.Sleep(time.Second * 1)
 
 				pos := w.users[userID].position.String()
@@ -322,12 +332,15 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 							wrld.Unlock()
 							if opponentID != "" && !isNPC {
 								resp, err := http.Get(fmt.Sprintf("http://localhost:8888/cmd?uid=%s&key=>attack", mID))
+								wrld.connectionInc()
 								if err != nil {
 									log.Println(err)
 									if strings.Contains(err.Error(), "no such host") || strings.Contains(err.Error(), "can't assign requested address") {
 										time.Sleep(time.Second * 10)
 									}
 								} else {
+									wrld.connectionDec()
+									io.Copy(ioutil.Discard, resp.Body)
 									resp.Body.Close()
 								}
 								continue
@@ -349,12 +362,15 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 					direction = "md"
 				}
 				resp, err := http.Get(fmt.Sprintf("http://localhost:8888/cmd?uid=%s&key=%s", mID, direction))
+				wrld.connectionInc()
 				if err != nil {
 					log.Println(err)
 					if strings.Contains(err.Error(), "no such host") {
 						time.Sleep(time.Second * 10)
 					}
 				} else {
+					wrld.connectionDec()
+					io.Copy(ioutil.Discard, resp.Body)
 					resp.Body.Close()
 				}
 
@@ -372,6 +388,18 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 	}
 
 	return true
+}
+
+func (wrld *world) connectionInc() {
+	wrld.Lock()
+	wrld.connections++
+	wrld.Unlock()
+}
+
+func (wrld *world) connectionDec() {
+	wrld.Lock()
+	wrld.connections--
+	wrld.Unlock()
 }
 
 func (wrld *world) updateBoard() {
@@ -683,15 +711,15 @@ func loadModal(s string) map[string]rune {
 
 func (wrld *world) info() string {
 	return fmt.Sprintf(`
-┌────────────────┐
-│ World Info     │▒
-╞════════════════╡▒
-│ Users:    %3d  │▒
-│ Capacity: %3d  │▒
-│                │▒
-└────────────────┘▒
- ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-`, len(wrld.users), wrld.capacity)
+┌─────────────────────┐
+│ World Info          │▒
+╞═════════════════════╡▒
+│ Users:       %3d    │▒
+│ Capacity:    %3d    │▒
+│ Connections: %3d    │▒
+└─────────────────────┘▒
+ ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+`, len(wrld.users), wrld.capacity, wrld.connections)
 }
 
 func help() string {
