@@ -63,6 +63,7 @@ type world struct {
 	commands    []command
 	users       map[string]user
 	connections int
+	startTime   time.Time
 }
 
 type location struct {
@@ -118,13 +119,14 @@ func genWorld() *world {
 	}
 	commands := make([]command, 0)
 	w := &world{locations: loc,
-		capacity: 5000, // TODO: testing on the mac. I think I'm leaking FDs. The bigger this number, the faster we crash
-		commands: commands,
-		users:    make(map[string]user),
+		capacity:  250, // TODO: testing on the mac. I think I'm leaking FDs. The bigger this number, the faster we crash
+		commands:  commands,
+		users:     make(map[string]user),
+		startTime: time.Now(),
 	}
 
 	// spawn monsters
-	saturationRate := 80
+	saturationRate := 4
 	opens := make([]*position, 0)
 	openCount := 0
 	// todo - don't count user spawn area as open
@@ -340,7 +342,7 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 									}
 								} else {
 									wrld.connectionDec()
-									io.Copy(ioutil.Discard, resp.Body)
+									io.Copy(ioutil.Discard, resp.Body) // read this might help reduce open sockets
 									resp.Body.Close()
 								}
 								continue
@@ -468,10 +470,25 @@ func (wrld *world) updateBoard() {
 					}
 				}(wrld, cmd.userID)
 			case "info":
-				tmpUser := wrld.users[cmd.userID]
-				tmpUser.activeModal = "help"
-				tmpUser.modal = loadModal(wrld.info())
-				wrld.users[cmd.userID] = tmpUser
+				go func(w *world, userID string) {
+					// todo: can you set up a doWhile package?
+					// pass in a func (?) bool (shrug)
+					// do ...
+					tmpUser := w.users[userID]
+					tmpUser.modal = loadModal(w.info())
+					tmpUser.activeModal = "info"
+					wrld.users[userID] = tmpUser
+					// while ...
+					c := time.Tick(time.Millisecond * 500)
+					for _ = range c {
+						tmpUser := w.users[userID]
+						if tmpUser.activeModal != "info" {
+							return
+						}
+						tmpUser.modal = loadModal(w.info())
+						wrld.users[userID] = tmpUser
+					}
+				}(wrld, cmd.userID)
 			case "attack":
 				// get all units in range and deal damage
 				// if their life falls to >0, recreate them
@@ -709,17 +726,22 @@ func loadModal(s string) map[string]rune {
 	return m
 }
 
+func timeSince(start time.Time) string {
+	return strings.Split(time.Since(start).String(), ".")[0] + "s"
+}
+
 func (wrld *world) info() string {
 	return fmt.Sprintf(`
-┌─────────────────────┐
-│ World Info          │▒
-╞═════════════════════╡▒
-│ Users:       %3d    │▒
-│ Capacity:    %3d    │▒
-│ Connections: %3d    │▒
-└─────────────────────┘▒
- ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
-`, len(wrld.users), wrld.capacity, wrld.connections)
+┌────────────────────────┐
+│ World Info             │▒
+╞════════════════════════╡▒
+│ Users:       %3d       │▒
+│ Capacity:    %3d       │▒
+│ Connections: %3d       │▒
+│ Uptime:%9s       │▒
+└────────────────────────┘▒
+ ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+`, len(wrld.users), wrld.capacity, wrld.connections, timeSince(wrld.startTime))
 }
 
 func help() string {
@@ -736,7 +758,7 @@ func help() string {
 │                                  │▒
 │ - help   - clear    - resize     │▒
 │ - attack - . (redo) - profile    │▒
-│                                  │▒
+│ - info                           │▒
 └──────────────────────────────────┘▒
  ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
 `
