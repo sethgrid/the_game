@@ -92,7 +92,7 @@ func main() {
 
 	listener := make(chan command)
 
-	w := genWorld()
+	w := genWorld("maps/map_2.map", 10, 500)
 
 	go gameRunner(w, listener)
 
@@ -110,23 +110,22 @@ func main() {
 	}
 }
 
-func genWorld() *world {
+func genWorld(mapPath string, monsterSaturationPercent, capacity int) *world {
 	loc := make([]location, 1)
 	loc[0] = location{
 		description: "init location",
 		display:     []byte("some map"),
-		positions:   loadMap("maps/map_2.map"),
+		positions:   loadMap(mapPath),
 	}
 	commands := make([]command, 0)
 	w := &world{locations: loc,
-		capacity:  250, // TODO: testing on the mac. I think I'm leaking FDs. The bigger this number, the faster we crash
+		capacity:  capacity, // TODO: testing on the mac. Seems stable at 500. I think I'm leaking FDs. The bigger this number, the faster we crash
 		commands:  commands,
 		users:     make(map[string]user),
 		startTime: time.Now(),
 	}
 
 	// spawn monsters
-	saturationRate := 4
 	opens := make([]*position, 0)
 	openCount := 0
 	// todo - don't count user spawn area as open
@@ -138,7 +137,7 @@ func genWorld() *world {
 	}
 	rand.Seed(time.Now().Unix())
 	created := 0
-	for monsterCount := saturationRate * openCount / 100; monsterCount >= 0; monsterCount-- {
+	for monsterCount := monsterSaturationPercent * openCount / 100; monsterCount > 0; monsterCount-- {
 		idx := rand.Intn(len(opens))
 		pos := opens[idx]
 
@@ -157,6 +156,7 @@ func getWorld(wrld *world) http.HandlerFunc {
 		// todo sanitize
 		width, _ := strconv.Atoi(r.FormValue("w"))
 		height, _ := strconv.Atoi(r.FormValue("h"))
+		// todo - have spawn points
 		if wrld.createUser(r.FormValue("uid"), width, height, position{x: 2, y: 3}, false) {
 			w.Write(wrld.display(r.FormValue("uid"), width, height))
 		} else {
@@ -215,7 +215,7 @@ func gameRunner(wrld *world, listener chan command) {
 	}()
 }
 
-func (wrld *world) createUser(userID string, width, height int, startingPosition position, isNPC bool) bool {
+func (wrld *world) createUser(userID string, viewPortWidth, viewPortHeight int, startingPosition position, isNPC bool) bool {
 	if _, found := wrld.users[userID]; found {
 		return true
 	} else if len(wrld.users) >= wrld.capacity {
@@ -235,8 +235,8 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 
 	wrld.users[userID] = user{
 		position:    startingPosition,
-		viewPortX:   width,
-		viewPortY:   height,
+		viewPortX:   viewPortWidth,
+		viewPortY:   viewPortHeight,
 		commChan:    comm,
 		killChan:    kill,
 		energy:      maxEnergey / 10,
@@ -248,7 +248,7 @@ func (wrld *world) createUser(userID string, width, height int, startingPosition
 		userID:      userID,
 	}
 
-	// todo - instead of passing in the world, pass in a channel tied to this user
+	// todo - thought: instead of passing in the world, pass in a channel tied to this user
 	// the the user can have its own for select goro that takes in mutations to the user
 
 	go func(w *world, userID string) {
