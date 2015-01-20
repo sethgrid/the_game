@@ -598,14 +598,14 @@ func (wrld *world) updateBoard() {
 }
 
 func areaAttack(pos *position) {
-	original := pos.character
-	if original != ' ' {
+	//original := pos.character
+	if pos.userID == "" {
 		return
 	}
 	pos.character = '*'
 	<-time.Tick(time.Second * 1)
 
-	pos.character = original
+	pos.character = ' '
 }
 
 func (wrld *world) display(uid string, width, height int) []byte {
